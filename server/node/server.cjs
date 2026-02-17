@@ -1,10 +1,18 @@
 const express = require('express');
+const compression = require('compression');
 const app = express();
 const path = require('path');
 const htmlparser = require('node-html-parser');
 const { existsSync, mkdirSync, readFileSync, writeFileSync } = require('fs');
 const fs = require('fs/promises')
 const crypto = require('crypto')
+app.use(compression({
+    filter: (req, res) => {
+        const type = res.getHeader('Content-Type');
+        if (type === 'application/octet-stream') return true;
+        return compression.filter(req, res);
+    }
+}));
 app.use(express.static(path.join(process.cwd(), 'dist'), {index: false}));
 app.use(express.json({ limit: '100mb' }));
 app.use(express.raw({ type: 'application/octet-stream', limit: '100mb' }));
