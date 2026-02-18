@@ -559,14 +559,15 @@ async function cleanChunks() {
     }
     else {
         const indexes = await forageStorage.keys()
+        const assetsToRemove: string[] = []
         const characterIds = new Set<string>(
             db.characters.map((v) => v.chaId)
         )
         for (const asset of indexes) {
             if (asset.startsWith('assets/')) {
                 const n = getBasename(asset)
-                if(!uncleanable.has(n)) {
-                    await forageStorage.removeItem(asset)
+                if (!uncleanable.has(n)) {
+                    assetsToRemove.push(asset)
                 }
             }
             else if (asset.startsWith('remotes/')) {
@@ -596,6 +597,16 @@ async function cleanChunks() {
                     if (okayToDelete) {
                         await forageStorage.removeItem(asset)
                     }
+                }
+            }
+        }
+        // Bulk delete assets
+        if (assetsToRemove.length > 0) {
+            try {
+                await forageStorage.removeItems(assetsToRemove)
+            } catch {
+                for (const asset of assetsToRemove) {
+                    await forageStorage.removeItem(asset)
                 }
             }
         }
