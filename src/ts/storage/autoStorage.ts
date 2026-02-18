@@ -37,6 +37,14 @@ export class AutoStorage{
         return await this.realStorage.removeItem(key)
     }
 
+    async removeItems(keys: string[]) {
+        await this.Init()
+        if (typeof (this.realStorage as any).removeItems === 'function') {
+            return await (this.realStorage as any).removeItems(keys)
+        }
+        throw "removeItems Error: Not supported by current storage"
+    }
+
     async checkAccountSync(){
         let db = getDatabase()
         if(this.isAccount){
