@@ -32,6 +32,7 @@ import { initMobileGesture } from "./hotkey";
 import { moduleUpdate } from "./process/modules";
 import type { AccountStorage } from "./storage/accountStorage";
 import { makeColdData } from "./process/coldstorage.svelte";
+import { migrateLocalInlaysToServer } from "./process/files/inlays";
 import {
     forageStorage,
     saveDb,
@@ -198,6 +199,12 @@ export async function loadData() {
             try {
                 await loadPlugins()
             } catch (error) { }
+            LoadingStatusState.text = "Migration Inlays..."
+            try {
+                await migrateLocalInlaysToServer()
+            } catch (error) {
+                console.error('[Inlay] Migration error during bootstrap:', error)
+            }
             if (getDatabase().account) {
                 LoadingStatusState.text = "Checking Account Data..."
                 try {
