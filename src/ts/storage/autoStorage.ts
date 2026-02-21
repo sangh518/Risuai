@@ -14,10 +14,15 @@ export class AutoStorage{
 
     realStorage:LocalForage|NodeStorage|OpfsStorage|AccountStorage
 
-    async setItem(key:string, value:Uint8Array):Promise<string|null> {
+    async setItem(key:string, value:Uint8Array, etag?:string):Promise<string|null> {
         await this.Init()
         if(this.isAccount){
             return await (this.realStorage as AccountStorage).setItem(key, value)
+        }
+        // Pass etag to NodeStorage for conflict detection
+        if (this.realStorage instanceof NodeStorage && etag) {
+            const resultEtag = await (this.realStorage as NodeStorage).setItem(key, value, etag)
+            return resultEtag ?? null
         }
         await this.realStorage.setItem(key, value)
         return null
@@ -52,13 +57,21 @@ export class AutoStorage{
         throw "removeItems Error: Not supported by current storage"
     }
 
-    async patchItem(key: string, patchData: { patch: any[], expectedHash: string }): Promise<boolean> {
+    async patchItem(key: string, patchData: { patch: any[], expectedHash: string }): Promise<{success: boolean, etag?: string}> {
         await this.Init()
         // Only NodeStorage supports patching for now
         if (this.realStorage instanceof NodeStorage && supportsPatchSync) {
             return await (this.realStorage as NodeStorage).patchItem(key, patchData)
         }
-        return false
+        return { success: false }
+    }
+
+    /** Get the last known ETag for database.bin from NodeStorage */
+    getDbEtag(): string | null {
+        if (this.realStorage instanceof NodeStorage) {
+            return (this.realStorage as NodeStorage)._lastDbEtag
+        }
+        return null
     }
 
     async checkAccountSync() {

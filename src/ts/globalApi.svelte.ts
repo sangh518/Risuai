@@ -26,6 +26,7 @@ import { defaultJailbreak, defaultMainPrompt, oldJailbreak, oldMainPrompt } from
 import { loadRisuAccountData } from "./drive/accounter";
 import { decodeRisuSave, encodeRisuSaveLegacy, RisuSaveEncoder, RisuSavePatcher, type toSaveType } from "./storage/risuSave";
 import { AutoStorage } from "./storage/autoStorage";
+import { ConflictError } from "./storage/nodeStorage";
 import { updateAnimationSpeed } from "./gui/animation";
 import { updateColorScheme, updateTextThemeAndCSS } from "./gui/colorscheme";
 import { autoServerBackup, saveDbKei } from "./kei/backup";
@@ -439,12 +440,48 @@ export async function saveDb() {
             else {
                 if (!forageStorage.isAccount) {
                     let saved = false
+                    let newEtag: string | undefined
                     if (supportsPatchSync) {
                         const patchData = await patcher.set(db, safeStructuredClone(toSave))
-                        saved = await forageStorage.patchItem('database/database.bin', patchData);
+                        const patchResult = await forageStorage.patchItem('database/database.bin', patchData);
+                        saved = patchResult.success
+                        if (patchResult.etag) {
+                            newEtag = patchResult.etag
+                        }
                     }
                     if (!saved) {
-                        await forageStorage.setItem('database/database.bin', dbData)
+                        try {
+                            // Use ETag for conflict detection on full writes
+                            const currentEtag = forageStorage.getDbEtag()
+                            const writeEtag = await forageStorage.setItem('database/database.bin', dbData, currentEtag ?? undefined)
+                            if (writeEtag) {
+                                newEtag = writeEtag
+                            }
+                        } catch (conflictErr) {
+                            if (conflictErr instanceof ConflictError) {
+                                console.warn('[Save] Conflict detected, reloading database from server...')
+                                // Reload latest DB from server
+                                const latestData = await forageStorage.getItem('database/database.bin') as unknown as Uint8Array
+                                if (latestData && latestData.length > 0) {
+                                    const latestDb = await decodeRisuSave(latestData)
+                                    setDatabase(latestDb)
+                                    // Re-initialize encoder and patcher with latest server state
+                                    encoder = new RisuSaveEncoder()
+                                    await encoder.init(getDatabase(), {
+                                        compression: forageStorage.isAccount
+                                    })
+                                    if (supportsPatchSync) {
+                                        patcher = new RisuSavePatcher()
+                                        await patcher.init(getDatabase())
+                                    }
+                                }
+                                // Mark changed so the save loop retries with fresh state
+                                changed = true
+                                await sleep(500)
+                                continue
+                            }
+                            throw conflictErr  // re-throw non-conflict errors
+                        }
                         await forageStorage.setItem(`database/dbbackup-${(Date.now() / 100).toFixed()}.bin`, dbData)
 
                         if (supportsPatchSync) {

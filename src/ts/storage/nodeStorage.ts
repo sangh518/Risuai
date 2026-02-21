@@ -4,18 +4,36 @@ import { alertInput } from "../alert"
 let auth:string = null
 let authChecked = false
 
+// Custom error class for database conflict detection
+export class ConflictError extends Error {
+    currentEtag: string
+    constructor(message: string, currentEtag: string) {
+        super(message)
+        this.name = 'ConflictError'
+        this.currentEtag = currentEtag
+    }
+}
+
 export class NodeStorage{
-    async setItem(key:string, value:Uint8Array) {
+    async setItem(key:string, value:Uint8Array, etag?:string) {
         await this.checkAuth()
+        const headers: Record<string, string> = {
+            'content-type': 'application/octet-stream',
+            'file-path': Buffer.from(key, 'utf-8').toString('hex'),
+            'risu-auth': auth
+        }
+        if (etag) {
+            headers['x-if-match'] = etag
+        }
         const da = await fetch('/api/write', {
             method: "POST",
             body: value as any,
-            headers: {
-                'content-type': 'application/octet-stream',
-                'file-path': Buffer.from(key, 'utf-8').toString('hex'),
-                'risu-auth': auth
-            }
+            headers
         })
+        if(da.status === 409){
+            const data = await da.json()
+            throw new ConflictError(data.error, data.currentEtag)
+        }
         if(da.status < 200 || da.status >= 300){
             throw "setItem Error"
         }
@@ -23,6 +41,7 @@ export class NodeStorage{
         if(data.error){
             throw data.error
         }
+        return data.etag as string | undefined
     }
     async getItem(key:string):Promise<Buffer> {
         await this.checkAuth()
@@ -37,12 +56,21 @@ export class NodeStorage{
             throw "getItem Error"
         }
 
+        // Capture ETag for database.bin
+        const etag = da.headers.get('x-db-etag')
+        if (etag) {
+            this._lastDbEtag = etag
+        }
+
         const data = Buffer.from(await da.arrayBuffer())
         if (data.length == 0){
             return null
         }
         return data
     }
+
+    /** Last known ETag for database.bin, captured during getItem */
+    _lastDbEtag: string | null = null
     async keys(prefix: string = ''): Promise<string[]> {
         await this.checkAuth()
         const da = await fetch('/api/list', {
@@ -100,7 +128,7 @@ export class NodeStorage{
         }
     }
 
-    async patchItem(key: string, patchData: { patch: any[], expectedHash: string }): Promise<boolean> {
+    async patchItem(key: string, patchData: { patch: any[], expectedHash: string }): Promise<{success: boolean, etag?: string}> {
         await this.checkAuth()
 
         const da = await fetch('/api/patch', {
@@ -114,13 +142,13 @@ export class NodeStorage{
         })
 
         if (da.status < 200 || da.status >= 300) {
-            return false
+            return { success: false }
         }
         const data = await da.json()
         if (data.error) {
-            return false
+            return { success: false }
         }
-        return true
+        return { success: true, etag: data.etag }
     }
 
     private async checkAuth() {

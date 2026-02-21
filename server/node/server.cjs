@@ -47,6 +47,9 @@ let dbCache = {}
 let saveTimers = {}
 const SAVE_INTERVAL = 5000 // Save to disk after 5 seconds of inactivity
 
+// ETag for database.bin to detect concurrent modification conflicts
+let dbEtag = null
+
 const savePath = path.join(process.cwd(), "save")
 if(!existsSync(savePath)){
     mkdirSync(savePath)
@@ -431,6 +434,7 @@ app.get('/api/read', async (req, res, next) => {
     }
     try {
         const fullPath = path.join(savePath, filePath);
+        const decodedFilePath = Buffer.from(filePath, 'hex').toString('utf-8');
 
         // Stop any pending save timer for this file
         if(saveTimers[filePath]){
@@ -455,7 +459,15 @@ app.get('/api/read', async (req, res, next) => {
         }
         else{
             res.setHeader('Content-Type', 'application/octet-stream');
-            res.sendFile(fullPath);
+            // For database.bin, compute and return ETag
+            if (decodedFilePath === 'database/database.bin') {
+                const content = await fs.readFile(fullPath);
+                dbEtag = crypto.createHash('md5').update(content).digest('hex');
+                res.setHeader('X-Db-Etag', dbEtag);
+                res.send(content);
+            } else {
+                res.sendFile(fullPath);
+            }
         }
     } catch (error) {
         next(error);
@@ -574,7 +586,27 @@ app.post('/api/write', async (req, res, next) => {
     }
 
     try {
+        const decodedFilePath = Buffer.from(filePath, 'hex').toString('utf-8');
+
+        // ETag-based conflict detection for database.bin
+        const ifMatch = req.headers['x-if-match'];
+        if (decodedFilePath === 'database/database.bin' && ifMatch && dbEtag) {
+            if (ifMatch !== dbEtag) {
+                console.log(`[Write] Version conflict for database.bin: client=${ifMatch}, server=${dbEtag}`);
+                res.status(409).send({
+                    error: 'Conflict: database has been modified by another device',
+                    currentEtag: dbEtag
+                });
+                return;
+            }
+        }
+
         await fs.writeFile(path.join(savePath, filePath), fileContent);
+
+        // Update ETag for database.bin after successful write
+        if (decodedFilePath === 'database/database.bin') {
+            dbEtag = crypto.createHash('md5').update(fileContent).digest('hex');
+        }
 
         // Clear any pending save timer for this file
         if (saveTimers[filePath]) {
@@ -586,7 +618,8 @@ app.post('/api/write', async (req, res, next) => {
         if (dbCache[filePath]) delete dbCache[filePath];
 
         res.send({
-            success: true
+            success: true,
+            etag: decodedFilePath === 'database/database.bin' ? dbEtag : undefined
         });
     } catch (error) {
         next(error);
@@ -684,9 +717,15 @@ app.post('/api/patch', async (req, res, next) => {
             }
         }, SAVE_INTERVAL);
 
+        // Update ETag after successful patch
+        if (decodedFilePath.includes('database/database.bin')) {
+            dbEtag = crypto.createHash('md5').update(JSON.stringify(dbCache[filePath])).digest('hex');
+        }
+
         res.send({
             success: true,
             appliedOperations: result.length,
+            etag: decodedFilePath.includes('database/database.bin') ? dbEtag : undefined,
         });
     } catch (error) {
         console.error(`[Patch] Error applying patch to ${filePath}:`, error.name);
