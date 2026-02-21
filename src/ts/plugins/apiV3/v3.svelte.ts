@@ -577,6 +577,16 @@ const makeRisuaiAPIV3 = (iframe:HTMLIFrameElement,plugin:RisuPlugin) => {
         loadPlugins: oldApis.loadPlugins,
         readImage: oldApis.readImage,
         saveAsset: oldApis.saveAsset,
+        inlayGetKeys: oldApis.inlayGetKeys,
+        inlayGetItem: oldApis.inlayGetItem,
+        inlayGetListItem: oldApis.inlayGetListItem,
+        inlayGetMeta: oldApis.inlayGetMeta,
+        inlayGetMetas: oldApis.inlayGetMetas,
+        inlaySetItem: oldApis.inlaySetItem,
+        inlaySetMeta: oldApis.inlaySetMeta,
+        inlayRemoveItem: oldApis.inlayRemoveItem,
+        inlayRemoveItems: oldApis.inlayRemoveItems,
+        getCharacterChatIndex: oldApis.getCharacterChatIndex,
         //Same functionality, but new implementation
         getDatabase: async (includeOnly:string[]|'all' = 'all') => {
             const conf = await getPluginPermission(plugin.name, 'db');

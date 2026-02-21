@@ -11,6 +11,7 @@ import { checkCodeSafety } from "./pluginSafety";
 import { SafeDocument, SafeIdbFactory, SafeLocalStorage } from "./pluginSafeClass";
 import { loadV3Plugins } from "./apiV3/v3.svelte";
 import { pluginCodeTranspiler } from "./apiV3/transpiler";
+import { listInlayAssets, getInlayAsset, getInlayListItem, getInlayMeta, getInlayMetas, setInlayAsset, removeInlayAsset, removeInlayAssets, setInlayMetaFields, listInlayKeys } from "../process/files/inlays";
 
 export const customProviderStore = writable([] as string[])
 
@@ -784,7 +785,63 @@ export const getV2PluginAPIs = () => {
         saveAsset: (data:Uint8Array) => {
             return saveAsset(data);
         },
+        inlayGetKeys: async () => {
+            return await listInlayKeys()
+        },
+        inlayGetItem: async (id: string) => {
+            return await getInlayAsset(id)
+        },
+        inlayGetListItem: async (id: string) => {
+            return await getInlayListItem(id)
+        },
+        inlayGetMeta: async (id: string) => {
+            return await getInlayMeta(id)
+        },
+        inlayGetMetas: async (ids: string[]) => {
+            return await getInlayMetas(ids ?? [])
+        },
+        inlaySetItem: async (id: string, asset: any) => {
+            await setInlayAsset(id, asset)
+        },
+        inlaySetMeta: async (id: string, patch: any) => {
+            await setInlayMetaFields(id, patch ?? {})
+        },
+        inlayRemoveItem: async (id: string) => {
+            await removeInlayAsset(id)
+        },
+        inlayRemoveItems: async (ids: string[]) => {
+            return await removeInlayAssets(ids)
+        },
+        getCharacterChatIndex: async () => {
+            const db = getDatabase()
+            const characters = db?.characters ?? {}
+            const entries: Array<{
+                chaId: string
+                name: string
+                chats: Array<{ id: string, name: string }>
+            }> = []
 
+            for (const key of Object.keys(characters)) {
+                const c = characters[key]
+                if (!c?.chaId) continue
+                const chats = Array.isArray(c.chats)
+                    ? c.chats
+                        .filter((ch: any) => !!ch?.id)
+                        .map((ch: any) => ({
+                            id: String(ch.id),
+                            name: (typeof ch.name === 'string' && ch.name.trim())
+                                ? ch.name.trim()
+                                : `채팅 ${String(ch.id).slice(0, 8)}`
+                        }))
+                    : []
+                entries.push({
+                    chaId: String(c.chaId),
+                    name: c.name || c.nickname || 'Unknown',
+                    chats
+                })
+            }
+            return entries
+        },
     }
 }
 
@@ -838,6 +895,10 @@ export async function loadV2Plugin(plugins: RisuPlugin[]) {
                         const setArg = globalThis.__pluginApis__.setArg
                         const saveAsset = globalThis.__pluginApis__.saveAsset
                         const readImage = globalThis.__pluginApis__.readImage
+                        const inlayGetKeys = globalThis.__pluginApis__.inlayGetKeys
+                        const inlayGetItem = globalThis.__pluginApis__.inlayGetItem
+                        const inlaySetItem = globalThis.__pluginApis__.inlaySetItem
+                        const inlayRemoveItem = globalThis.__pluginApis__.inlayRemoveItem
                         ${version === '2.1' ? `
                             const safeGlobalThis = globalThis.__pluginApis__.getSafeGlobalThis()
                             const Risuai = globalThis.__pluginApis__
