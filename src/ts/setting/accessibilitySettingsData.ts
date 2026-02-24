@@ -46,6 +46,13 @@ export const accessibilitySettingsItems: SettingItem[] = [
         keywords: ['send', 'enter', 'keyboard', 'submit']
     },
     {
+        id: 'acc.sendOnlyByClick',
+        type: 'check',
+        labelKey: 'sendOnlyByClick',
+        bindKey: 'sendOnlyByClick',
+        keywords: ['send', 'click', 'button', 'keyboard', 'enter']
+    },
+    {
         id: 'acc.fixedChatTextarea',
         type: 'check',
         labelKey: 'fixedChatTextarea',

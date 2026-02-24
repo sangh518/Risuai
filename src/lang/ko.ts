@@ -735,6 +735,7 @@ export const languageKorean = {
     "globalRegexScript": "글로벌 정규식",
     "accessibility": "접근성",
     "sendWithEnter": "엔터키로 메세지 보내기(체크 해제시 Shift + Enter가 메세지 전송으로 변경.)",
+    "sendOnlyByClick": "클릭으로만 메세지 보내기(Enter/Shift + Enter 전송 비활성화)",
     "fixedChatTextarea": "채팅창 하단 고정",
     "clickToEdit": "클릭해서 수정하기",
     "enableBlockPartialEdit": "블록 부분 수정 활성화 (블록에 마우스를 올려 개별 수정)",

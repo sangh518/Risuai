@@ -140,6 +140,16 @@
         return sendMain(true)
     }
 
+    function shouldSendOnEnter(e: KeyboardEvent) {
+        if(DBState.db.sendOnlyByClick){
+            return false
+        }
+        if(DBState.db.sendWithEnter){
+            return !e.shiftKey
+        }
+        return e.shiftKey
+    }
+
     async function sendMain(continueResponse:boolean) {
         let selectedChar = $selectedCharID
         if($doingChat){
@@ -597,14 +607,9 @@
                           bind:value={messageInput}
                           bind:this={inputEle}
                           onkeydown={(e) => {
-                        if(e.key.toLocaleLowerCase() === "enter" && !e.isComposing){
-                            if(DBState.db.sendWithEnter && (!e.shiftKey)){
-                                send()
-                                e.preventDefault()
-                            }else if(!DBState.db.sendWithEnter && e.shiftKey){
-                                send()
-                                e.preventDefault()
-                            }
+                        if(e.key.toLocaleLowerCase() === "enter" && !e.isComposing && shouldSendOnEnter(e)){
+                            send()
+                            e.preventDefault()
                         }
                         if(e.key.toLocaleLowerCase() === "m" && (e.ctrlKey)){
                             reroll()
