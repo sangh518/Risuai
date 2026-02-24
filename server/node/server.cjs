@@ -50,6 +50,21 @@ const SAVE_INTERVAL = 5000 // Save to disk after 5 seconds of inactivity
 // ETag for database.bin to detect concurrent modification conflicts
 let dbEtag = null
 
+function computeBufferEtag(buffer) {
+    return crypto.createHash('md5').update(buffer).digest('hex');
+}
+
+function computeDatabaseEtagFromObject(databaseObject) {
+    return computeBufferEtag(Buffer.from(encodeRisuSaveLegacy(databaseObject)));
+}
+
+let storageOperationQueue = Promise.resolve();
+function queueStorageOperation(operation) {
+    const operationRun = storageOperationQueue.then(operation, operation);
+    storageOperationQueue = operationRun.catch(() => {});
+    return operationRun;
+}
+
 const savePath = path.join(process.cwd(), "save")
 if(!existsSync(savePath)){
     mkdirSync(savePath)
@@ -433,42 +448,43 @@ app.get('/api/read', async (req, res, next) => {
         return;
     }
     try {
-        const fullPath = path.join(savePath, filePath);
-        const decodedFilePath = Buffer.from(filePath, 'hex').toString('utf-8');
+        await queueStorageOperation(async () => {
+            const fullPath = path.join(savePath, filePath);
+            const decodedFilePath = Buffer.from(filePath, 'hex').toString('utf-8');
 
-        // Stop any pending save timer for this file
-        if(saveTimers[filePath]){
-            clearTimeout(saveTimers[filePath]);
-            delete saveTimers[filePath];
-        }
-
-        // Write to disk if available in cache
-        if(dbCache[filePath]){
-            try {
-                let dataToSave = encodeRisuSaveLegacy(dbCache[filePath]);
-                await fs.writeFile(fullPath, dataToSave);
-            } catch (error) {
-                console.error(`[Read] Error saving ${filePath}:`, error);
+            // Stop any pending save timer for this file
+            if(saveTimers[filePath]){
+                clearTimeout(saveTimers[filePath]);
+                delete saveTimers[filePath];
             }
-            delete dbCache[filePath];
-        }
 
-        // Read from disk
-        if(!existsSync(fullPath)){
-            res.send();
-        }
-        else{
-            res.setHeader('Content-Type', 'application/octet-stream');
-            // For database.bin, compute and return ETag
-            if (decodedFilePath === 'database/database.bin') {
-                const content = await fs.readFile(fullPath);
-                dbEtag = crypto.createHash('md5').update(content).digest('hex');
-                res.setHeader('X-Db-Etag', dbEtag);
-                res.send(content);
+            // Write to disk if available in cache
+            if(dbCache[filePath]){
+                try {
+                    let dataToSave = encodeRisuSaveLegacy(dbCache[filePath]);
+                    await fs.writeFile(fullPath, dataToSave);
+                } catch (error) {
+                    console.error(`[Read] Error saving ${filePath}:`, error);
+                }
+                delete dbCache[filePath];
+            }
+
+            // Read from disk
+            if(!existsSync(fullPath)){
+                res.send();
             } else {
-                res.sendFile(fullPath);
+                res.setHeader('Content-Type', 'application/octet-stream');
+                // For database.bin, compute and return ETag
+                if (decodedFilePath === 'database/database.bin') {
+                    const content = await fs.readFile(fullPath);
+                    dbEtag = computeBufferEtag(content);
+                    res.setHeader('X-Db-Etag', dbEtag);
+                    res.send(content);
+                } else {
+                    res.sendFile(fullPath);
+                }
             }
-        }
+        });
     } catch (error) {
         next(error);
     }
@@ -586,40 +602,42 @@ app.post('/api/write', async (req, res, next) => {
     }
 
     try {
-        const decodedFilePath = Buffer.from(filePath, 'hex').toString('utf-8');
+        await queueStorageOperation(async () => {
+            const decodedFilePath = Buffer.from(filePath, 'hex').toString('utf-8');
 
-        // ETag-based conflict detection for database.bin
-        const ifMatch = req.headers['x-if-match'];
-        if (decodedFilePath === 'database/database.bin' && ifMatch && dbEtag) {
-            if (ifMatch !== dbEtag) {
-                console.log(`[Write] Version conflict for database.bin: client=${ifMatch}, server=${dbEtag}`);
-                res.status(409).send({
-                    error: 'Conflict: database has been modified by another device',
-                    currentEtag: dbEtag
-                });
-                return;
+            // ETag-based conflict detection for database.bin
+            const ifMatch = req.headers['x-if-match'];
+            if (decodedFilePath === 'database/database.bin' && ifMatch && dbEtag) {
+                if (ifMatch !== dbEtag) {
+                    console.log(`[Write] Version conflict for database.bin: client=${ifMatch}, server=${dbEtag}`);
+                    res.status(409).send({
+                        error: 'Conflict: database has been modified by another device',
+                        currentEtag: dbEtag
+                    });
+                    return;
+                }
             }
-        }
 
-        await fs.writeFile(path.join(savePath, filePath), fileContent);
+            await fs.writeFile(path.join(savePath, filePath), fileContent);
 
-        // Update ETag for database.bin after successful write
-        if (decodedFilePath === 'database/database.bin') {
-            dbEtag = crypto.createHash('md5').update(fileContent).digest('hex');
-        }
+            // Update ETag for database.bin after successful write
+            if (decodedFilePath === 'database/database.bin') {
+                dbEtag = computeBufferEtag(fileContent);
+            }
 
-        // Clear any pending save timer for this file
-        if (saveTimers[filePath]) {
-            clearTimeout(saveTimers[filePath]);
-            delete saveTimers[filePath];
-        }
+            // Clear any pending save timer for this file
+            if (saveTimers[filePath]) {
+                clearTimeout(saveTimers[filePath]);
+                delete saveTimers[filePath];
+            }
 
-        // Clear cache for this file since it was directly written
-        if (dbCache[filePath]) delete dbCache[filePath];
+            // Clear cache for this file since it was directly written
+            if (dbCache[filePath]) delete dbCache[filePath];
 
-        res.send({
-            success: true,
-            etag: decodedFilePath === 'database/database.bin' ? dbEtag : undefined
+            res.send({
+                success: true,
+                etag: decodedFilePath === 'database/database.bin' ? dbEtag : undefined
+            });
         });
     } catch (error) {
         next(error);
@@ -660,72 +678,79 @@ app.post('/api/patch', async (req, res, next) => {
     }
 
     try {
-        const decodedFilePath = Buffer.from(filePath, 'hex').toString('utf-8');
+        await queueStorageOperation(async () => {
+            const decodedFilePath = Buffer.from(filePath, 'hex').toString('utf-8');
 
-        // Load database into memory if not already cached
-        if (!dbCache[filePath]) {
-            const fullPath = path.join(savePath, filePath);
-            if (existsSync(fullPath)) {
-                const fileContent = await fs.readFile(fullPath);
-                dbCache[filePath] = normalizeJSON(await decodeRisuSave(fileContent));
-            }
-            else {
-                dbCache[filePath] = {};
-            }
-        }
-
-        const serverHash = calculateHash(dbCache[filePath]).toString(16);
-
-        if (expectedHash !== serverHash) {
-            console.log(`[Patch] Hash mismatch for ${decodedFilePath}: expected=${expectedHash}, server=${serverHash}`);
-            res.status(409).send({
-                error: 'Hash mismatch - data out of sync',
-            });
-            return;
-        }
-
-        // Apply patch to in-memory database
-        const result = applyPatch(dbCache[filePath], patch, true);
-
-        // Schedule save to disk (debounced)
-        if (saveTimers[filePath]) {
-            clearTimeout(saveTimers[filePath]);
-        }
-        saveTimers[filePath] = setTimeout(async () => {
-            try {
+            // Load database into memory if not already cached
+            if (!dbCache[filePath]) {
                 const fullPath = path.join(savePath, filePath);
-                let dataToSave = encodeRisuSaveLegacy(dbCache[filePath]);
-                await fs.writeFile(fullPath, dataToSave);
-                // Create backup for database files after successful save
-                if (decodedFilePath.includes('database/database.bin')) {
-                    try {
-                        const timestamp = Math.floor(Date.now() / 100).toString();
-                        const backupFileName = `database/dbbackup-${timestamp}.bin`;
-                        const backupFilePath = Buffer.from(backupFileName, 'utf-8').toString('hex');
-                        const backupFullPath = path.join(savePath, backupFilePath);
-                        // Create backup using the same data that was just saved
-                        await fs.writeFile(backupFullPath, dataToSave);
-                    } catch (backupError) {
-                        console.error(`[Patch] Error creating backup:`, backupError);
-                    }
+                if (existsSync(fullPath)) {
+                    const fileContent = await fs.readFile(fullPath);
+                    dbCache[filePath] = normalizeJSON(await decodeRisuSave(fileContent));
                 }
-            } catch (error) {
-                dbCache[filePath] = {}; // trigger hash mismatch on next patch and fallback to full save
-                console.error(`[Patch] Error saving ${filePath}:`, error);
-            } finally {
-                delete saveTimers[filePath];
+                else {
+                    dbCache[filePath] = {};
+                }
             }
-        }, SAVE_INTERVAL);
 
-        // Update ETag after successful patch
-        if (decodedFilePath.includes('database/database.bin')) {
-            dbEtag = crypto.createHash('md5').update(JSON.stringify(dbCache[filePath])).digest('hex');
-        }
+            const serverHash = calculateHash(dbCache[filePath]).toString(16);
 
-        res.send({
-            success: true,
-            appliedOperations: result.length,
-            etag: decodedFilePath.includes('database/database.bin') ? dbEtag : undefined,
+            if (expectedHash !== serverHash) {
+                console.log(`[Patch] Hash mismatch for ${decodedFilePath}: expected=${expectedHash}, server=${serverHash}`);
+                let currentEtag = undefined;
+                if (decodedFilePath === 'database/database.bin') {
+                    currentEtag = computeDatabaseEtagFromObject(dbCache[filePath]);
+                    dbEtag = currentEtag;
+                }
+                res.status(409).send({
+                    error: 'Hash mismatch - data out of sync',
+                    currentEtag
+                });
+                return;
+            }
+
+            // Apply patch to in-memory database
+            const result = applyPatch(dbCache[filePath], patch, true);
+
+            // Schedule save to disk (debounced)
+            if (saveTimers[filePath]) {
+                clearTimeout(saveTimers[filePath]);
+            }
+            saveTimers[filePath] = setTimeout(async () => {
+                try {
+                    const fullPath = path.join(savePath, filePath);
+                    let dataToSave = encodeRisuSaveLegacy(dbCache[filePath]);
+                    await fs.writeFile(fullPath, dataToSave);
+                    // Create backup for database files after successful save
+                    if (decodedFilePath.includes('database/database.bin')) {
+                        try {
+                            const timestamp = Math.floor(Date.now() / 100).toString();
+                            const backupFileName = `database/dbbackup-${timestamp}.bin`;
+                            const backupFilePath = Buffer.from(backupFileName, 'utf-8').toString('hex');
+                            const backupFullPath = path.join(savePath, backupFilePath);
+                            // Create backup using the same data that was just saved
+                            await fs.writeFile(backupFullPath, dataToSave);
+                        } catch (backupError) {
+                            console.error(`[Patch] Error creating backup:`, backupError);
+                        }
+                    }
+                } catch (error) {
+                    console.error(`[Patch] Error saving ${filePath}:`, error);
+                } finally {
+                    delete saveTimers[filePath];
+                }
+            }, SAVE_INTERVAL);
+
+            // Update ETag after successful patch
+            if (decodedFilePath === 'database/database.bin') {
+                dbEtag = computeDatabaseEtagFromObject(dbCache[filePath]);
+            }
+
+            res.send({
+                success: true,
+                appliedOperations: result.length,
+                etag: decodedFilePath === 'database/database.bin' ? dbEtag : undefined,
+            });
         });
     } catch (error) {
         console.error(`[Patch] Error applying patch to ${filePath}:`, error.name);

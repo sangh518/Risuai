@@ -119,6 +119,7 @@ export class RisuSaveEncoder {
 
     private blocks: { [key: string]: Uint8Array } = {};
     private compression: boolean = false;
+    private characterHashes: { [key: string]: number } = {};
 
     async init(data:Database,arg:{
         compression?: boolean,
@@ -154,6 +155,7 @@ export class RisuSaveEncoder {
             type: RisuSaveType.MODULES,
             name: 'modules'
         });
+        this.characterHashes = {}
         for( const character of data.characters) {
             this.blocks[character.chaId] = await this.encodeBlock({
                 compression,
@@ -164,6 +166,7 @@ export class RisuSaveEncoder {
             }, {
                 remote: 'prefer'
             });
+            this.characterHashes[character.chaId] = calculateHash(normalizeJSON(character))
         }
         this.blocks['config'] = await this.encodeBlock({
             compression,
@@ -186,20 +189,16 @@ export class RisuSaveEncoder {
 
         const savedId = new Set<string>();
         for(const character of data.characters) {
-            const index = toSave.character.indexOf(character.chaId);
-            if (index !== -1) {
-                this.blocks[character.chaId] = await this.encodeBlock({
-                    compression: this.compression,
-                    data: JSON.stringify(character),
-                    type: RisuSaveType.CHARACTER_WITH_CHAT,
-                    name: character.chaId
-                }, {
-                    remote: 'prefer'
-                });
-                savedId.add(character.chaId);
-                toSave.character.splice(index, 1);
+            if (!character?.chaId) {
+                continue
             }
-            else if(!this.blocks[character.chaId]){
+            const chaId = character.chaId
+            savedId.add(chaId)
+            const index = toSave.character.indexOf(chaId);
+            const currentHash = calculateHash(normalizeJSON(character))
+            const hasChanged = this.characterHashes[chaId] !== currentHash
+
+            if (index !== -1 || hasChanged || !this.blocks[chaId]) {
                 this.blocks[character.chaId] = await this.encodeBlock({
                     compression: this.compression,
                     data: JSON.stringify(character),
@@ -208,7 +207,10 @@ export class RisuSaveEncoder {
                 }, {
                     remote: 'prefer'
                 });
-                savedId.add(character.chaId);
+                this.characterHashes[chaId] = currentHash
+                if (index !== -1) {
+                    toSave.character.splice(index, 1);
+                }
             }
         }
         if(toSave.character.length > 0){
@@ -217,7 +219,21 @@ export class RisuSaveEncoder {
             for(const chaId of toSave.character){
                 if(!savedId.has(chaId)){
                     delete this.blocks[chaId];
+                    delete this.characterHashes[chaId];
                 }
+            }
+        }
+
+        // Ensure stale character blocks are always removed even when deletion wasn't tracked in toSave.
+        // This prevents deleted characters from being resurrected after full-write fallback.
+        const currentCharacterIds = new Set<string>((data.characters ?? []).map((character) => character?.chaId).filter(Boolean));
+        for (const key of Object.keys(this.blocks)) {
+            if (key === 'root' || key === 'preset' || key === 'modules' || key === 'config') {
+                continue;
+            }
+            if (!currentCharacterIds.has(key)) {
+                delete this.blocks[key];
+                delete this.characterHashes[key];
             }
         }
 
@@ -771,6 +787,7 @@ export class RisuSavePatcher {
         const { compare } = await import('fast-json-patch')
         const expectedHash: string = this.hash();
         const patch: any[] = []
+        const previousCharacterIds = new Set<string>((this.lastSyncedDb.characters ?? []).map((character) => character?.chaId).filter(Boolean))
 
         const {
             characters: lastCharacters,
@@ -810,19 +827,30 @@ export class RisuSavePatcher {
         for (let i = 0; i < Math.max(lastCharacters.length, curCharacters.length); i++) {
             const lastChar = lastCharacters[i]
             const curChar = curCharacters[i]
+            const normChar = normalizeJSON(curChar)
+            const curCharId = curChar?.chaId
+            const lastCharId = lastChar?.chaId
+            const curCharHash = curCharId ? calculateHash(normChar) : undefined
+            const trackedBySave =
+                toSave.character.includes(curCharId ?? '') ||
+                toSave.character.includes(lastCharId ?? '')
+            const changedByHash = !!(curCharId && curCharHash !== this.hashBlocks[curCharId])
+            const shouldPatch =
+                trackedBySave ||
+                lastCharId !== curCharId ||
+                changedByHash
 
-            if (toSave.character.includes(curChar?.chaId ?? '') ||
-                toSave.character.includes(lastChar?.chaId ?? '') ||
-                lastChar?.chaId != curChar?.chaId) {
-                const normChar = normalizeJSON(curChar)
-
+            if (shouldPatch) {
                 if (!normChar) {
                     patch.push({ op: 'remove', path: `/characters/${i}` })
                     this.lastSyncedDb.characters[i] = null;
+                    if (lastCharId) {
+                        delete this.hashBlocks[lastCharId];
+                    }
                 }
                 else if (!lastChar) {
                     patch.push({ op: 'add', path: `/characters/${i}`, value: normChar })
-                    this.hashBlocks[normChar.chaId] = calculateHash(normChar);
+                    this.hashBlocks[normChar.chaId] = curCharHash ?? calculateHash(normChar);
                     this.lastSyncedDb.characters[i] = normChar;
                 }
                 else {
@@ -831,12 +859,18 @@ export class RisuSavePatcher {
                         return v;
                     })
                     patch.push(...charPatch);
-                    this.hashBlocks[normChar.chaId] = calculateHash(normChar);
+                    this.hashBlocks[normChar.chaId] = curCharHash ?? calculateHash(normChar);
                     this.lastSyncedDb.characters[i] = normChar;
                 }
             }
         }
         this.lastSyncedDb.characters = this.lastSyncedDb.characters.filter(Boolean);
+        const currentCharacterIds = new Set<string>(this.lastSyncedDb.characters.map((character) => character?.chaId).filter(Boolean))
+        for (const previousCharacterId of previousCharacterIds) {
+            if (!currentCharacterIds.has(previousCharacterId)) {
+                delete this.hashBlocks[previousCharacterId]
+            }
+        }
 
         this.lastSyncedDb = {
             characters: this.lastSyncedDb.characters,

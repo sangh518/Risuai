@@ -15,6 +15,8 @@ export class ConflictError extends Error {
 }
 
 export class NodeStorage{
+    _lastDbEtag: string | null = null
+
     async setItem(key:string, value:Uint8Array, etag?:string) {
         await this.checkAuth()
         const headers: Record<string, string> = {
@@ -41,7 +43,11 @@ export class NodeStorage{
         if(data.error){
             throw data.error
         }
-        return data.etag as string | undefined
+        const nextEtag = data.etag as string | undefined
+        if (key === 'database/database.bin' && nextEtag) {
+            this._lastDbEtag = nextEtag
+        }
+        return nextEtag
     }
     async getItem(key:string):Promise<Buffer> {
         await this.checkAuth()
@@ -69,8 +75,10 @@ export class NodeStorage{
         return data
     }
 
-    /** Last known ETag for database.bin, captured during getItem */
-    _lastDbEtag: string | null = null
+    /** Last known ETag for database.bin */
+    setDbEtag(etag: string | null) {
+        this._lastDbEtag = etag
+    }
     async keys(prefix: string = ''): Promise<string[]> {
         await this.checkAuth()
         const da = await fetch('/api/list', {
@@ -141,6 +149,14 @@ export class NodeStorage{
             }
         })
 
+        if (da.status === 409) {
+            const data = await da.json()
+            const currentEtag = data.currentEtag as string | undefined
+            if (key === 'database/database.bin' && currentEtag) {
+                this._lastDbEtag = currentEtag
+            }
+            return { success: false, etag: currentEtag }
+        }
         if (da.status < 200 || da.status >= 300) {
             return { success: false }
         }
@@ -148,7 +164,11 @@ export class NodeStorage{
         if (data.error) {
             return { success: false }
         }
-        return { success: true, etag: data.etag }
+        const nextEtag = data.etag as string | undefined
+        if (key === 'database/database.bin' && nextEtag) {
+            this._lastDbEtag = nextEtag
+        }
+        return { success: true, etag: nextEtag }
     }
 
     private async checkAuth() {

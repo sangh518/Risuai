@@ -74,6 +74,13 @@ export class AutoStorage{
         return null
     }
 
+    /** Update cached ETag for database.bin in NodeStorage */
+    setDbEtag(etag: string | null) {
+        if (this.realStorage instanceof NodeStorage) {
+            (this.realStorage as NodeStorage).setDbEtag(etag)
+        }
+    }
+
     async checkAccountSync() {
         let db = getDatabase()
         if(this.isAccount){
