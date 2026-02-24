@@ -13,7 +13,7 @@ import { v4 as uuidv4, v4 } from 'uuid';
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { get } from "svelte/store";
 import { open } from '@tauri-apps/plugin-shell'
-import { setDatabase, type Database, defaultSdDataFunc, getDatabase, appVer, getCurrentCharacter } from "./storage/database.svelte";
+import { setDatabase, type Database, defaultSdDataFunc, getDatabase, appVer, getCurrentCharacter, dbMutationVersion } from "./storage/database.svelte";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { checkRisuUpdate } from "./update";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, DBState, LoadingStatusState, selIdState, ReloadGUIPointer, bodyIntercepterStore } from "./stores.svelte";
@@ -24,8 +24,9 @@ import { hasher } from "./parser/parser.svelte";
 import { characterURLImport, hubURL } from "./characterCards";
 import { defaultJailbreak, defaultMainPrompt, oldJailbreak, oldMainPrompt } from "./storage/defaultPrompts";
 import { loadRisuAccountData } from "./drive/accounter";
-import { decodeRisuSave, encodeRisuSaveLegacy, RisuSaveEncoder, type toSaveType } from "./storage/risuSave";
+import { decodeRisuSave, encodeRisuSaveLegacy, RisuSaveEncoder, RisuSavePatcher, type toSaveType } from "./storage/risuSave";
 import { AutoStorage } from "./storage/autoStorage";
+import { ConflictError } from "./storage/nodeStorage";
 import { updateAnimationSpeed } from "./gui/animation";
 import { updateColorScheme, updateTextThemeAndCSS } from "./gui/colorscheme";
 import { autoServerBackup, saveDbKei } from "./kei/backup";
@@ -40,7 +41,7 @@ import { fetch as TauriHTTPFetch } from '@tauri-apps/plugin-http';
 import { moduleUpdate } from "./process/modules";
 import type { AccountStorage } from "./storage/accountStorage";
 import { makeColdData } from "./process/coldstorage.svelte";
-import { isTauri, isNodeServer } from "./platform";
+import { isTauri, isNodeServer, supportsPatchSync } from "./platform";
 
 export const forageStorage = new AutoStorage()
 
@@ -320,9 +321,15 @@ export async function saveDb() {
         compression: forageStorage.isAccount
     })
 
+    let patcher = new RisuSavePatcher()
+    if (supportsPatchSync) {
+        await patcher.init(getDatabase())
+    }
+
     $effect.root(() => {
 
         let selIdState = $state(0)
+        let knownCharacterIds = new Set<string>((getDatabase()?.characters ?? []).map((character) => character?.chaId).filter(Boolean))
 
         const debounceTime = 500; // 500 milliseconds
         let saveTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -341,6 +348,10 @@ export async function saveDb() {
         }
 
         $effect(() => {
+            dbMutationVersion.value
+            saveTimeoutExecute()
+        })
+        $effect(() => {
             DBState.db.botPresetsId
             DBState.db.botPresets.length
             changeTracker.botPreset = true
@@ -352,6 +363,17 @@ export async function saveDb() {
             saveTimeoutExecute()
         })
         $effect(() => {
+            const currentCharacterIds = (DBState?.db?.characters ?? []).map((character) => character?.chaId).filter(Boolean)
+            $state.snapshot(currentCharacterIds)
+
+            const currentCharacterIdSet = new Set<string>(currentCharacterIds)
+            for (const previousCharacterId of knownCharacterIds) {
+                if (!currentCharacterIdSet.has(previousCharacterId)) {
+                    changeTracker.character = [previousCharacterId, ...changeTracker.character.filter((v) => v !== previousCharacterId)]
+                }
+            }
+            knownCharacterIds = currentCharacterIdSet
+
             for (const key in DBState.db) {
                 if (key !== 'characters' && key !== 'botPresets' && key !== 'modules') {
                     $state.snapshot(DBState.db[key])
@@ -378,7 +400,86 @@ export async function saveDb() {
         })
     })
 
+    function requeueTrackedChanges(toSave: toSaveType) {
+        changeTracker.character = [...new Set([...toSave.character, ...changeTracker.character])]
+        const chatSeen = new Set<string>()
+        changeTracker.chat = [...toSave.chat, ...changeTracker.chat].filter((chatPair) => {
+            const key = `${chatPair?.[0] ?? ''}|${chatPair?.[1] ?? ''}`
+            if (chatSeen.has(key)) {
+                return false
+            }
+            chatSeen.add(key)
+            return true
+        })
+        changeTracker.botPreset = changeTracker.botPreset || toSave.botPreset
+        changeTracker.modules = changeTracker.modules || toSave.modules
+    }
+
+    async function rebaseTrackedLocalChangesOnLatestServerDb(conflictEtag: string | null, db: Database, toSave: toSaveType) {
+        forageStorage.setDbEtag(conflictEtag ?? null)
+        const latestData = await forageStorage.getItem('database/database.bin') as unknown as Uint8Array
+        if (latestData && latestData.length > 0) {
+            const latestDb = await decodeRisuSave(latestData) as Database
+            const mergedDb = safeStructuredClone(latestDb) as Database
+            const localDb = safeStructuredClone(db) as Database
+
+            for (const key in localDb) {
+                if (key !== 'characters' && key !== 'botPresets' && key !== 'modules') {
+                    mergedDb[key] = safeStructuredClone(localDb[key])
+                }
+            }
+
+            if (toSave.botPreset) {
+                mergedDb.botPresets = safeStructuredClone(localDb.botPresets)
+                mergedDb.botPresetsId = localDb.botPresetsId
+            }
+            if (toSave.modules) {
+                mergedDb.modules = safeStructuredClone(localDb.modules)
+            }
+
+            const trackedCharIds = new Set<string>(toSave.character.filter(Boolean))
+            for (const trackedChat of toSave.chat) {
+                if (trackedChat?.[0]) {
+                    trackedCharIds.add(trackedChat[0])
+                }
+            }
+            const mergedCharacters = Array.isArray(mergedDb.characters) ? mergedDb.characters : []
+            const localCharacters = Array.isArray(localDb.characters) ? localDb.characters : []
+
+            for (const charId of trackedCharIds) {
+                const localChar = localCharacters.find((char) => char?.chaId === charId)
+                const mergedIndex = mergedCharacters.findIndex((char) => char?.chaId === charId)
+                if (localChar) {
+                    const clonedLocalChar = safeStructuredClone(localChar)
+                    if (mergedIndex >= 0) {
+                        mergedCharacters[mergedIndex] = clonedLocalChar
+                    }
+                    else {
+                        mergedCharacters.push(clonedLocalChar)
+                    }
+                }
+                else if (mergedIndex >= 0) {
+                    mergedCharacters.splice(mergedIndex, 1)
+                }
+            }
+            mergedDb.characters = mergedCharacters
+            setDatabase(mergedDb)
+
+            encoder = new RisuSaveEncoder()
+            await encoder.init(getDatabase(), {
+                compression: forageStorage.isAccount
+            })
+            if (supportsPatchSync) {
+                patcher = new RisuSavePatcher()
+                await patcher.init(getDatabase())
+            }
+        }
+        requeueTrackedChanges(toSave)
+        changed = true
+    }
+
     let savetrys = 0
+    let patchConflictRetries = 0
     let lastDbData = new Uint8Array(0)
     await sleep(1000)
     while (true) {
@@ -419,24 +520,77 @@ export async function saveDb() {
                 continue
             }
 
-            await encoder.set(db, toSave)
+            await encoder.set(db, safeStructuredClone(toSave))
             const encoded = encoder.encode()
             if (!encoded) {
                 await sleep(1000)
                 continue
             }
             const dbData = new Uint8Array(encoded)
+
             if (isTauri) {
                 await writeFile('database/database.bin', dbData, { baseDir: BaseDirectory.AppData });
                 await writeFile(`database/dbbackup-${(Date.now() / 100).toFixed()}.bin`, dbData, { baseDir: BaseDirectory.AppData });
             }
             else {
-
-                await forageStorage.setItem('database/database.bin', dbData)
                 if (!forageStorage.isAccount) {
-                    await forageStorage.setItem(`database/dbbackup-${(Date.now() / 100).toFixed()}.bin`, dbData)
+                    let saved = false
+                    let newEtag: string | undefined
+                    let patchConflictEtag: string | null = null
+                    if (supportsPatchSync) {
+                        const patchData = await patcher.set(db, safeStructuredClone(toSave))
+                        const patchResult = await forageStorage.patchItem('database/database.bin', patchData);
+                        saved = patchResult.success
+                        if (saved) patchConflictRetries = 0
+                        if (patchResult.etag) {
+                            newEtag = patchResult.etag
+                            forageStorage.setDbEtag(patchResult.etag)
+                        }
+                        if (!patchResult.success && patchResult.etag) {
+                            patchConflictEtag = patchResult.etag
+                        }
+                    }
+                    if (!saved) {
+                        if (patchConflictEtag) {
+                            patchConflictRetries++
+                            if (patchConflictRetries <= 3) {
+                                console.warn(`[Save] Patch conflict detected (retry ${patchConflictRetries}/3), rebasing...`)
+                                await rebaseTrackedLocalChangesOnLatestServerDb(patchConflictEtag, db, toSave)
+                                await sleep(500)
+                                continue
+                            }
+                            console.warn('[Save] Max patch conflict retries exceeded, falling through to full write...')
+                            patchConflictRetries = 0
+                        }
+                        try {
+                            // Use ETag for conflict detection on full writes
+                            const currentEtag = forageStorage.getDbEtag()
+                            const writeEtag = await forageStorage.setItem('database/database.bin', dbData, currentEtag ?? undefined)
+                            if (writeEtag) {
+                                newEtag = writeEtag
+                            }
+                        } catch (conflictErr) {
+                            if (conflictErr instanceof ConflictError) {
+                                console.warn('[Save] Full-write conflict detected, rebasing tracked local changes on latest server DB...')
+                                await rebaseTrackedLocalChangesOnLatestServerDb(conflictErr.currentEtag ?? null, db, toSave)
+                                await sleep(500)
+                                continue
+                            }
+                            throw conflictErr  // re-throw non-conflict errors
+                        }
+                        await forageStorage.setItem(`database/dbbackup-${(Date.now() / 100).toFixed()}.bin`, dbData)
+
+                        if (supportsPatchSync) {
+                            const decodedDb = await decodeRisuSave(dbData)
+                            await patcher.init(decodedDb);
+                        }
+                    }
+                    if (newEtag) {
+                        forageStorage.setDbEtag(newEtag)
+                    }
                 }
                 if (forageStorage.isAccount) {
+                    await forageStorage.setItem('database/database.bin', dbData)
                     await sleep(3000)
                 }
             }
@@ -488,7 +642,7 @@ export async function getDbBackups() {
         return backups
     }
     else {
-        const keys = await forageStorage.keys()
+        const keys = await forageStorage.keys('database/dbbackup-')
 
         const backups = keys
             .filter(key => key.startsWith('database/dbbackup-'))

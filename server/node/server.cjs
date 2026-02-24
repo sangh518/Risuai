@@ -6,6 +6,14 @@ const htmlparser = require('node-html-parser');
 const { existsSync, mkdirSync, readFileSync, writeFileSync } = require('fs');
 const fs = require('fs/promises')
 const crypto = require('crypto')
+const { applyPatch } = require('fast-json-patch')
+const {
+    decodeRisuSave,
+    encodeRisuSaveLegacy,
+    calculateHash,
+    normalizeJSON,
+} = require('./utils.cjs')
+
 app.use(compression({
     filter: (req, res) => {
         const type = res.getHeader('Content-Type');
@@ -24,6 +32,38 @@ const hubURL = 'https://sv.risuai.xyz';
 const openid = require('openid-client');
 
 let password = ''
+
+// Configuration flags for patch-based sync
+let enablePatchSync = true
+const [nodeMajor, nodeMinor, nodePatch] = process.version.slice(1).split('.').map(Number);
+// v22.7.0, v23 and above have a bug with msgpackr that causes it to crash on encoding risu saves
+if (nodeMajor >= 23 || (nodeMajor === 22 && nodeMinor === 7 && nodePatch === 0)) {
+    console.log(`[Server] Detected problematic Node.js version ${process.version}. Disabling patch-based sync.`);
+    enablePatchSync = false;
+}
+
+// In-memory database cache for patch-based sync
+let dbCache = {}
+let saveTimers = {}
+const SAVE_INTERVAL = 5000 // Save to disk after 5 seconds of inactivity
+
+// ETag for database.bin to detect concurrent modification conflicts
+let dbEtag = null
+
+function computeBufferEtag(buffer) {
+    return crypto.createHash('md5').update(buffer).digest('hex');
+}
+
+function computeDatabaseEtagFromObject(databaseObject) {
+    return computeBufferEtag(Buffer.from(encodeRisuSaveLegacy(databaseObject)));
+}
+
+let storageOperationQueue = Promise.resolve();
+function queueStorageOperation(operation) {
+    const operationRun = storageOperationQueue.then(operation, operation);
+    storageOperationQueue = operationRun.catch(() => {});
+    return operationRun;
+}
 
 const savePath = path.join(process.cwd(), "save")
 if(!existsSync(savePath)){
@@ -51,7 +91,7 @@ app.get('/', async (req, res, next) => {
         const mainIndex = await fs.readFile(path.join(process.cwd(), 'dist', 'index.html'))
         const root = htmlparser.parse(mainIndex)
         const head = root.querySelector('head')
-        head.innerHTML = `<script>globalThis.__NODE__ = true</script>` + head.innerHTML
+        head.innerHTML = `<script>globalThis.__NODE__ = true; globalThis.__PATCH_SYNC__ = ${enablePatchSync}</script>` + head.innerHTML
         
         res.send(root.toString())
     } catch (error) {
@@ -408,13 +448,43 @@ app.get('/api/read', async (req, res, next) => {
         return;
     }
     try {
-        if(!existsSync(path.join(savePath, filePath))){
-            res.send();
-        }
-        else{
-            res.setHeader('Content-Type','application/octet-stream');
-            res.sendFile(path.join(savePath, filePath));
-        }
+        await queueStorageOperation(async () => {
+            const fullPath = path.join(savePath, filePath);
+            const decodedFilePath = Buffer.from(filePath, 'hex').toString('utf-8');
+
+            // Stop any pending save timer for this file
+            if(saveTimers[filePath]){
+                clearTimeout(saveTimers[filePath]);
+                delete saveTimers[filePath];
+            }
+
+            // Write to disk if available in cache
+            if(dbCache[filePath]){
+                try {
+                    let dataToSave = encodeRisuSaveLegacy(dbCache[filePath]);
+                    await fs.writeFile(fullPath, dataToSave);
+                } catch (error) {
+                    console.error(`[Read] Error saving ${filePath}:`, error);
+                }
+                delete dbCache[filePath];
+            }
+
+            // Read from disk
+            if(!existsSync(fullPath)){
+                res.send();
+            } else {
+                res.setHeader('Content-Type', 'application/octet-stream');
+                // For database.bin, compute and return ETag
+                if (decodedFilePath === 'database/database.bin') {
+                    const content = await fs.readFile(fullPath);
+                    dbEtag = computeBufferEtag(content);
+                    res.setHeader('X-Db-Etag', dbEtag);
+                    res.send(content);
+                } else {
+                    res.sendFile(fullPath);
+                }
+            }
+        });
     } catch (error) {
         next(error);
     }
@@ -494,9 +564,11 @@ app.get('/api/list', async (req, res, next) => {
         return
     }
     try {
-        const data = (await fs.readdir(path.join(savePath))).map((v) => {
-            return Buffer.from(v, 'hex').toString('utf-8')
-        })
+        const prefix = (req.headers['key-prefix'] || '').trim();
+        const data = (await fs.readdir(path.join(savePath)))
+            .map((v) => { return Buffer.from(v, 'hex').toString('utf-8') })
+            .filter((v) => { return !prefix || v.startsWith(prefix) })
+
         res.send({
             success: true,
             content: data
@@ -530,12 +602,161 @@ app.post('/api/write', async (req, res, next) => {
     }
 
     try {
-        await fs.writeFile(path.join(savePath, filePath), fileContent);
-        res.send({
-            success: true
+        await queueStorageOperation(async () => {
+            const decodedFilePath = Buffer.from(filePath, 'hex').toString('utf-8');
+
+            // ETag-based conflict detection for database.bin
+            const ifMatch = req.headers['x-if-match'];
+            if (decodedFilePath === 'database/database.bin' && ifMatch && dbEtag) {
+                if (ifMatch !== dbEtag) {
+                    console.log(`[Write] Version conflict for database.bin: client=${ifMatch}, server=${dbEtag}`);
+                    res.status(409).send({
+                        error: 'Conflict: database has been modified by another device',
+                        currentEtag: dbEtag
+                    });
+                    return;
+                }
+            }
+
+            await fs.writeFile(path.join(savePath, filePath), fileContent);
+
+            // Update ETag for database.bin after successful write
+            if (decodedFilePath === 'database/database.bin') {
+                dbEtag = computeBufferEtag(fileContent);
+            }
+
+            // Clear any pending save timer for this file
+            if (saveTimers[filePath]) {
+                clearTimeout(saveTimers[filePath]);
+                delete saveTimers[filePath];
+            }
+
+            // Clear cache for this file since it was directly written
+            if (dbCache[filePath]) delete dbCache[filePath];
+
+            res.send({
+                success: true,
+                etag: decodedFilePath === 'database/database.bin' ? dbEtag : undefined
+            });
         });
     } catch (error) {
         next(error);
+    }
+});
+
+app.post('/api/patch', async (req, res, next) => {
+    // Check if patch sync is enabled
+    if (!enablePatchSync) {
+        res.status(404).send({
+            error: 'Patch sync is not enabled'
+        });
+        return;
+    }
+
+    if (req.headers['risu-auth'].trim() !== password.trim()) {
+        console.log('incorrect')
+        res.status(400).send({
+            error: 'Password Incorrect'
+        });
+        return
+    }
+    const filePath = req.headers['file-path'];
+    const patch = req.body.patch;
+    const expectedHash = req.body.expectedHash;
+
+    if (!filePath || !patch || !expectedHash) {
+        res.status(400).send({
+            error: 'File path, patch, and expected hash required'
+        });
+        return;
+    }
+    if (!isHex(filePath)) {
+        res.status(400).send({
+            error: 'Invaild Path'
+        });
+        return;
+    }
+
+    try {
+        await queueStorageOperation(async () => {
+            const decodedFilePath = Buffer.from(filePath, 'hex').toString('utf-8');
+
+            // Load database into memory if not already cached
+            if (!dbCache[filePath]) {
+                const fullPath = path.join(savePath, filePath);
+                if (existsSync(fullPath)) {
+                    const fileContent = await fs.readFile(fullPath);
+                    dbCache[filePath] = normalizeJSON(await decodeRisuSave(fileContent));
+                }
+                else {
+                    dbCache[filePath] = {};
+                }
+            }
+
+            const serverHash = calculateHash(dbCache[filePath]).toString(16);
+
+            if (expectedHash !== serverHash) {
+                console.log(`[Patch] Hash mismatch for ${decodedFilePath}: expected=${expectedHash}, server=${serverHash}`);
+                let currentEtag = undefined;
+                if (decodedFilePath === 'database/database.bin') {
+                    currentEtag = computeDatabaseEtagFromObject(dbCache[filePath]);
+                    dbEtag = currentEtag;
+                }
+                res.status(409).send({
+                    error: 'Hash mismatch - data out of sync',
+                    currentEtag
+                });
+                return;
+            }
+
+            // Apply patch to in-memory database
+            const result = applyPatch(dbCache[filePath], patch, true);
+
+            // Schedule save to disk (debounced)
+            if (saveTimers[filePath]) {
+                clearTimeout(saveTimers[filePath]);
+            }
+            saveTimers[filePath] = setTimeout(async () => {
+                try {
+                    const fullPath = path.join(savePath, filePath);
+                    let dataToSave = encodeRisuSaveLegacy(dbCache[filePath]);
+                    await fs.writeFile(fullPath, dataToSave);
+                    // Create backup for database files after successful save
+                    if (decodedFilePath.includes('database/database.bin')) {
+                        try {
+                            const timestamp = Math.floor(Date.now() / 100).toString();
+                            const backupFileName = `database/dbbackup-${timestamp}.bin`;
+                            const backupFilePath = Buffer.from(backupFileName, 'utf-8').toString('hex');
+                            const backupFullPath = path.join(savePath, backupFilePath);
+                            // Create backup using the same data that was just saved
+                            await fs.writeFile(backupFullPath, dataToSave);
+                        } catch (backupError) {
+                            console.error(`[Patch] Error creating backup:`, backupError);
+                        }
+                    }
+                } catch (error) {
+                    console.error(`[Patch] Error saving ${filePath}:`, error);
+                } finally {
+                    delete saveTimers[filePath];
+                }
+            }, SAVE_INTERVAL);
+
+            // Update ETag after successful patch
+            if (decodedFilePath === 'database/database.bin') {
+                dbEtag = computeDatabaseEtagFromObject(dbCache[filePath]);
+            }
+
+            res.send({
+                success: true,
+                appliedOperations: result.length,
+                etag: decodedFilePath === 'database/database.bin' ? dbEtag : undefined,
+            });
+        });
+    } catch (error) {
+        console.error(`[Patch] Error applying patch to ${filePath}:`, error.name);
+        res.status(500).send({
+            error: 'Patch application failed: ' + (error && error.message ? error.message : error)
+        });
     }
 });
 
@@ -681,12 +902,14 @@ async function startServer() {
             https.createServer(httpsOptions, app).listen(port, () => {
                 console.log("[Server] HTTPS server is running.");
                 console.log(`[Server] https://localhost:${port}/`);
+                console.log(`[Server] Patch sync: ${enablePatchSync ? 'ENABLED' : 'DISABLED'}`);
             });
         } else {
             // HTTP
             app.listen(port, () => {
                 console.log("[Server] HTTP server is running.");
                 console.log(`[Server] http://localhost:${port}/`);
+                console.log(`[Server] Patch sync: ${enablePatchSync ? 'ENABLED' : 'DISABLED'}`);
             });
         }
     } catch (error) {

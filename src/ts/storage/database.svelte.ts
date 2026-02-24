@@ -17,6 +17,9 @@ import { isTauri, isNodeServer } from "src/ts/platform"
 //APP_VERSION_POINT is to locate the app version in the database file for version bumping
 export let appVer = "2026.2.200" //<APP_VERSION_POINT>
 export let webAppSubVer = ''
+export const dbMutationVersion = $state({
+    value: 0
+})
 
 
 export function setDatabase(data:Database){
@@ -645,6 +648,7 @@ export function setDatabase(data:Database){
 
 export function setDatabaseLite(data:Database){
     DBState.db = data
+    dbMutationVersion.value += 1
 }
 
 interface getDatabaseOptions{
@@ -672,6 +676,7 @@ export function setCurrentCharacter(char:character|groupChat){
         DBState.db.characters = []
     }
     DBState.db.characters[get(selectedCharID)] = char
+    dbMutationVersion.value += 1
 }
 
 export function getCharacterByIndex(index:number,options:getDatabaseOptions = {}):character|groupChat{
@@ -688,6 +693,7 @@ export function setCharacterByIndex(index:number,char:character|groupChat){
         DBState.db.characters = []
     }
     DBState.db.characters[index] = char
+    dbMutationVersion.value += 1
 }
 
 export function getCurrentChat(){

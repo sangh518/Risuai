@@ -1,6 +1,6 @@
 import localforage from "localforage"
 import { replaceDbResources } from "../globalApi.svelte"
-import { isNodeServer } from "src/ts/platform"
+import { isNodeServer, supportsPatchSync } from "src/ts/platform"
 import { NodeStorage } from "./nodeStorage"
 import { OpfsStorage } from "./opfsStorage"
 import { alertInput, alertSelect, alertStore } from "../alert"
@@ -14,10 +14,15 @@ export class AutoStorage{
 
     realStorage:LocalForage|NodeStorage|OpfsStorage|AccountStorage
 
-    async setItem(key:string, value:Uint8Array):Promise<string|null> {
+    async setItem(key:string, value:Uint8Array, etag?:string):Promise<string|null> {
         await this.Init()
         if(this.isAccount){
             return await (this.realStorage as AccountStorage).setItem(key, value)
+        }
+        // Pass etag to NodeStorage for conflict detection
+        if (this.realStorage instanceof NodeStorage && etag) {
+            const resultEtag = await (this.realStorage as NodeStorage).setItem(key, value, etag)
+            return resultEtag ?? null
         }
         await this.realStorage.setItem(key, value)
         return null
@@ -27,9 +32,16 @@ export class AutoStorage{
         return await this.realStorage.getItem(key)
 
     }
-    async keys():Promise<string[]>{
+    async keys(prefix: string = ''): Promise<string[]> {
         await this.Init()
-        return await this.realStorage.keys()
+        let result: string[]
+        if (this.realStorage instanceof NodeStorage) {
+            result = await this.realStorage.keys(prefix)
+        }
+        else {
+            result = await this.realStorage.keys()
+        }
+        return result.filter((key) => key.startsWith(prefix.trim()) || !prefix.trim())
 
     }
     async removeItem(key:string){
@@ -45,7 +57,31 @@ export class AutoStorage{
         throw "removeItems Error: Not supported by current storage"
     }
 
-    async checkAccountSync(){
+    async patchItem(key: string, patchData: { patch: any[], expectedHash: string }): Promise<{success: boolean, etag?: string}> {
+        await this.Init()
+        // Only NodeStorage supports patching for now
+        if (this.realStorage instanceof NodeStorage && supportsPatchSync) {
+            return await (this.realStorage as NodeStorage).patchItem(key, patchData)
+        }
+        return { success: false }
+    }
+
+    /** Get the last known ETag for database.bin from NodeStorage */
+    getDbEtag(): string | null {
+        if (this.realStorage instanceof NodeStorage) {
+            return (this.realStorage as NodeStorage)._lastDbEtag
+        }
+        return null
+    }
+
+    /** Update cached ETag for database.bin in NodeStorage */
+    setDbEtag(etag: string | null) {
+        if (this.realStorage instanceof NodeStorage) {
+            (this.realStorage as NodeStorage).setDbEtag(etag)
+        }
+    }
+
+    async checkAccountSync() {
         let db = getDatabase()
         if(this.isAccount){
             return true
