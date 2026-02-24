@@ -479,6 +479,7 @@ export async function saveDb() {
     }
 
     let savetrys = 0
+    let patchConflictRetries = 0
     let lastDbData = new Uint8Array(0)
     await sleep(1000)
     while (true) {
@@ -540,6 +541,7 @@ export async function saveDb() {
                         const patchData = await patcher.set(db, safeStructuredClone(toSave))
                         const patchResult = await forageStorage.patchItem('database/database.bin', patchData);
                         saved = patchResult.success
+                        if (saved) patchConflictRetries = 0
                         if (patchResult.etag) {
                             newEtag = patchResult.etag
                             forageStorage.setDbEtag(patchResult.etag)
@@ -550,10 +552,15 @@ export async function saveDb() {
                     }
                     if (!saved) {
                         if (patchConflictEtag) {
-                            console.warn('[Save] Patch conflict detected, rebasing tracked local changes on latest server DB...')
-                            await rebaseTrackedLocalChangesOnLatestServerDb(patchConflictEtag, db, toSave)
-                            await sleep(500)
-                            continue
+                            patchConflictRetries++
+                            if (patchConflictRetries <= 3) {
+                                console.warn(`[Save] Patch conflict detected (retry ${patchConflictRetries}/3), rebasing...`)
+                                await rebaseTrackedLocalChangesOnLatestServerDb(patchConflictEtag, db, toSave)
+                                await sleep(500)
+                                continue
+                            }
+                            console.warn('[Save] Max patch conflict retries exceeded, falling through to full write...')
+                            patchConflictRetries = 0
                         }
                         try {
                             // Use ETag for conflict detection on full writes

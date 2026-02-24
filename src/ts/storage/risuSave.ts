@@ -292,10 +292,7 @@ export class RisuSaveEncoder {
             option.remote === 'force' ||
             (
                 option.remote === 'prefer' &&
-                (
-                    isTauri ||
-                    isNodeServer
-                )
+                isTauri
             ) &&
             !disableRemoteSaving()
         ){
