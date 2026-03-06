@@ -114,16 +114,85 @@ class NodeInlayStorage {
         }
     }
 
+    // LRU Cache specific methods
+    private getCacheSize(asset: InlayAsset): number {
+        if (asset.data instanceof Blob) {
+            return asset.data.size
+        } else if (typeof asset.data === 'string') {
+            return asset.data.length
+        }
+        return 0
+    }
+
+    private async updateCacheMeta(id: string, size: number) {
+        await localInlayCacheMeta.setItem(id, {
+            lastAccessed: Date.now(),
+            size
+        })
+    }
+
+    private async enforceCacheLimit() {
+        const MAX_CACHE_SIZE = 500 * 1024 * 1024 // 500 MB
+        let totalSize = 0
+        const entries: { id: string; lastAccessed: number; size: number }[] = []
+
+        await localInlayCacheMeta.iterate<{ lastAccessed: number, size: number }, void>((meta, key) => {
+            if (meta) {
+                totalSize += meta.size || 0
+                entries.push({ id: key, ...meta })
+            }
+        })
+
+        if (totalSize > MAX_CACHE_SIZE) {
+            // Sort by oldest accessed first
+            entries.sort((a, b) => a.lastAccessed - b.lastAccessed)
+            
+            for (const entry of entries) {
+                if (totalSize <= MAX_CACHE_SIZE) break;
+                
+                await localInlayCacheStorage.removeItem(entry.id)
+                await localInlayCacheMeta.removeItem(entry.id)
+                totalSize -= entry.size
+            }
+        }
+    }
+
     async setItem(id: string, asset: InlayAsset): Promise<void> {
         const bytes = await this.serializeAsset(asset)
         await this.nodeStorage.setItem(this.serverKey(id), bytes)
+
+        // Update local cache
+        const coreAsset = toCoreInlayAsset(asset) // Ensure no proxied object is cached
+        await localInlayCacheStorage.setItem(id, coreAsset)
+        await this.updateCacheMeta(id, this.getCacheSize(coreAsset))
+        await this.enforceCacheLimit()
     }
 
     async getItem<T>(id: string): Promise<T | null> {
+        // 1. Try local cache first
+        try {
+            const cachedAsset = await localInlayCacheStorage.getItem<T>(id)
+            if (cachedAsset) {
+                await this.updateCacheMeta(id, this.getCacheSize(cachedAsset as unknown as InlayAsset))
+                return cachedAsset
+            }
+        } catch (e) {
+            console.error('[Inlay Cache] Failed to read from cache:', e)
+        }
+
+        // 2. Fallback to server fetch
         try {
             const buf = await this.nodeStorage.getItem(this.serverKey(id))
             if (!buf || buf.length === 0) return null
-            return this.deserializeAsset(buf) as unknown as T
+            const asset = this.deserializeAsset(buf)
+            
+            // 3. Save to local cache for next time
+            const coreAsset = toCoreInlayAsset(asset)
+            await localInlayCacheStorage.setItem(id, coreAsset)
+            await this.updateCacheMeta(id, this.getCacheSize(coreAsset))
+            await this.enforceCacheLimit()
+            
+            return asset as unknown as T
         } catch {
             return null
         }
@@ -132,6 +201,8 @@ class NodeInlayStorage {
     async removeItem(id: string): Promise<void> {
         try {
             await this.nodeStorage.removeItem(this.serverKey(id))
+            await localInlayCacheStorage.removeItem(id)
+            await localInlayCacheMeta.removeItem(id)
         } catch {
             // ignore if not found
         }
@@ -151,7 +222,7 @@ class NodeInlayStorage {
         for (const decodedKey of allKeys) {
             const id = decodedKey.replace(INLAY_PREFIX, '')
             try {
-                // NodeStorage.getItem() internally hex-encodes the key for the server
+                // Return from server for `iterate` to be safe, but can also cache
                 const buf = await this.nodeStorage.getItem(decodedKey)
                 if (buf && buf.length > 0) {
                     const asset = this.deserializeAsset(buf)
@@ -219,6 +290,16 @@ const localInlayStorage = localforage.createInstance({
 const localInlayThumbStorage = localforage.createInstance({
     name: 'inlay_thumb',
     storeName: 'inlay_thumb'
+})
+
+const localInlayCacheStorage = localforage.createInstance({
+    name: 'inlay_cache',
+    storeName: 'inlay_cache'
+})
+
+const localInlayCacheMeta = localforage.createInstance({
+    name: 'inlay_cache_meta',
+    storeName: 'inlay_cache_meta'
 })
 
 let _nodeInlayStorage: NodeInlayStorage | null = null
