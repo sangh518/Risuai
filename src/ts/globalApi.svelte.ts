@@ -1760,6 +1760,25 @@ export async function fetchNative(url: string, arg: {
             status: r.status
         })
     }
+    else if (isNodeServer) {
+        const r = await fetch(`/proxy2`, {
+            body: realBody as any,
+            headers: {
+                "risu-header": encodeURIComponent(JSON.stringify(headers)),
+                "risu-url": encodeURIComponent(url),
+                "Content-Type": "application/json",
+                ...(localStorage.getItem('risuauth') ? { "risu-auth": localStorage.getItem('risuauth') } : {}),
+                ...(DBState?.db?.requestLocation && { "risu-location": DBState.db.requestLocation }),
+            },
+            method: arg.method,
+            signal: arg.signal
+        })
+
+        return new Response(r.body, {
+            headers: r.headers,
+            status: r.status
+        })
+    }
     else {
         return await fetch(url, {
             body: realBody as any,
