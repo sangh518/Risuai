@@ -648,6 +648,19 @@ export function setDatabase(data:Database){
     // If the user uses plugins, its probably better to enable RisuAI Pro Tools by default
     // Because its likely they are power users who would benefit from the features
     data.enableRisuaiProTools ??= data.plugins.length > 0
+    for(const char of data.characters){
+        if(!char){
+            continue
+        }
+        char.modules ??= []
+        char.chats ??= []
+        for(const chat of char.chats){
+            if(!chat){
+                continue
+            }
+            normalizePromptOptionState(chat, data, char)
+        }
+    }
     changeLanguage(data.language)
     setDatabaseLite(data)
 }
@@ -709,6 +722,185 @@ export function getCurrentChat(){
 
 export function setCurrentChat(chat:Chat){
     const char = getCurrentCharacter()
+    char.chats[char.chatPage] = chat
+    setCurrentCharacter(char)
+}
+
+function parseToggleKeysFromTemplate(template:string){
+    const keys = new Set<string>()
+    for(const rawLine of template.split('\n')){
+        const line = rawLine.trim()
+        if(!line){
+            continue
+        }
+        const parts = line.split('=')
+        const key = parts[0]?.trim()
+        const type = parts[2]?.trim()
+        if(!key || type === 'group' || type === 'groupEnd' || type === 'divider' || type === 'caption'){
+            continue
+        }
+        keys.add(`toggle_${key}`)
+    }
+    return Array.from(keys)
+}
+
+function getEnabledModuleDefinitions(db:Database, char:character|groupChat, chat:Chat){
+    const ids = [
+        ...(db.enabledModules ?? []),
+        ...(char.modules ?? []),
+        ...(chat.modules ?? []),
+        ...(db.moduleIntergration ? db.moduleIntergration.split(',').map((value) => value.trim()).filter(Boolean) : [])
+    ]
+    const idSet = new Set(ids)
+    const seen = new Set<string>()
+    const modules = []
+    for(const module of db.modules ?? []){
+        if(!module){
+            continue
+        }
+        if(!idSet.has(module.id) && !(module.namespace && idSet.has(module.namespace))){
+            continue
+        }
+        if(seen.has(module.id)){
+            continue
+        }
+        seen.add(module.id)
+        modules.push(module)
+    }
+    return modules
+}
+
+export function getDefinedPromptToggleKeys(db:Database, char:character|groupChat, chat:Chat){
+    const moduleToggleTemplate = getEnabledModuleDefinitions(db, char, chat)
+        .map((module) => module.customModuleToggle ?? '')
+        .filter(Boolean)
+        .join('\n')
+    return parseToggleKeysFromTemplate(`${db.customPromptTemplateToggle ?? ''}\n${moduleToggleTemplate}`)
+}
+
+export function snapshotPromptToggleValues(db:Database, keys:string[]){
+    const values:Record<string, string> = {}
+    for(const key of keys){
+        const value = db.globalChatVariables[key]
+        if(value !== undefined){
+            values[key] = value
+        }
+    }
+    return values
+}
+
+export function applyPromptToggleValues(db:Database, values:Record<string, string>, keys:string[]){
+    for(const key of keys){
+        const value = values[key]
+        if(value === undefined){
+            delete db.globalChatVariables[key]
+            continue
+        }
+        db.globalChatVariables[key] = value
+    }
+}
+
+function normalizePromptOptionState(chat:Chat, db:Database, char:character|groupChat){
+    chat.modules ??= []
+    const keys = getDefinedPromptToggleKeys(db, char, chat)
+    const currentState = chat.promptOptionState
+    const normalizedValues:Record<string, string> = {}
+    for(const key of keys){
+        const value = currentState?.toggleValues?.[key]
+        if(value !== undefined){
+            normalizedValues[key] = value
+        }
+    }
+
+    if(!currentState){
+        chat.promptOptionState = {
+            version: 1,
+            toggleValues: snapshotPromptToggleValues(db, keys),
+            updatedAt: Date.now(),
+            sourcePresetId: null
+        }
+        return true
+    }
+
+    const nextUpdatedAt = currentState.updatedAt ?? Date.now()
+    const nextSourcePresetId = currentState.sourcePresetId ?? null
+    const changed =
+        currentState.version !== 1 ||
+        currentState.updatedAt !== nextUpdatedAt ||
+        (currentState.sourcePresetId ?? null) !== nextSourcePresetId ||
+        JSON.stringify(currentState.toggleValues ?? {}) !== JSON.stringify(normalizedValues)
+
+    if(changed){
+        chat.promptOptionState = {
+            version: 1,
+            toggleValues: normalizedValues,
+            updatedAt: nextUpdatedAt,
+            sourcePresetId: nextSourcePresetId
+        }
+    }
+    return changed
+}
+
+export function ensureChatPromptOptionState(char = getCurrentCharacter(), chat = getCurrentChat(), db = getDatabase()){
+    if(!char || !chat){
+        return null
+    }
+    const changed = normalizePromptOptionState(chat, db, char)
+    if(changed){
+        char.chats[char.chatPage] = chat
+        setCurrentCharacter(char)
+    }
+    return chat.promptOptionState ?? null
+}
+
+export function initializeChatPromptOptionState(chat:Chat, char = getCurrentCharacter(), db = getDatabase()){
+    if(!char || !chat){
+        return chat
+    }
+    chat.modules ??= []
+    if(chat.promptOptionState){
+        normalizePromptOptionState(chat, db, char)
+        return chat
+    }
+    const keys = getDefinedPromptToggleKeys(db, char, chat)
+    chat.promptOptionState = {
+        version: 1,
+        toggleValues: snapshotPromptToggleValues(db, keys),
+        updatedAt: Date.now(),
+        sourcePresetId: null
+    }
+    return chat
+}
+
+export function syncCurrentChatPromptOptionState(){
+    const db = getDatabase()
+    const char = getCurrentCharacter()
+    const chat = getCurrentChat()
+    if(!char || !chat){
+        return
+    }
+    chat.modules ??= []
+    const keys = getDefinedPromptToggleKeys(db, char, chat)
+    chat.promptOptionState = {
+        version: 1,
+        toggleValues: snapshotPromptToggleValues(db, keys),
+        updatedAt: Date.now(),
+        sourcePresetId: chat.promptOptionState?.sourcePresetId ?? null
+    }
+    char.chats[char.chatPage] = chat
+    setCurrentCharacter(char)
+}
+
+export function applyCurrentChatPromptOptionState(){
+    const db = getDatabase()
+    const char = getCurrentCharacter()
+    const chat = getCurrentChat()
+    if(!char || !chat){
+        return
+    }
+    const state = ensureChatPromptOptionState(char, chat, db)
+    const keys = getDefinedPromptToggleKeys(db, char, chat)
+    applyPromptToggleValues(db, state?.toggleValues ?? {}, keys)
     char.chats[char.chatPage] = chat
     setCurrentCharacter(char)
 }
@@ -1676,6 +1868,13 @@ interface ComfyConfig{
 
 export type FormatingOrderItem = 'main'|'jailbreak'|'chats'|'lorebook'|'globalNote'|'authorNote'|'lastChat'|'description'|'postEverything'|'personaPrompt'
 
+export interface ChatPromptOptionState{
+    version: 1
+    toggleValues: Record<string, string>
+    updatedAt?: number
+    sourcePresetId?: number | null
+}
+
 export interface Chat{
     message: Message[]
     note:string
@@ -1697,6 +1896,7 @@ export interface Chat{
     lastDate?:number
     bookmarks?: string[];
     bookmarkNames?: { [chatId: string]: string };
+    promptOptionState?: ChatPromptOptionState
 }
 
 export interface ChatFolder{

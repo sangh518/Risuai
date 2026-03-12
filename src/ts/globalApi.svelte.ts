@@ -13,7 +13,7 @@ import { v4 as uuidv4, v4 } from 'uuid';
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { get } from "svelte/store";
 import { open } from '@tauri-apps/plugin-shell'
-import { setDatabase, type Database, defaultSdDataFunc, getDatabase, appVer, getCurrentCharacter, dbMutationVersion } from "./storage/database.svelte";
+import { setDatabase, type Database, defaultSdDataFunc, getDatabase, appVer, getCurrentCharacter, dbMutationVersion, applyCurrentChatPromptOptionState } from "./storage/database.svelte";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { checkRisuUpdate } from "./update";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, DBState, LoadingStatusState, selIdState, ReloadGUIPointer, bodyIntercepterStore } from "./stores.svelte";
@@ -2247,6 +2247,7 @@ export function changeChatTo(IdOrIndex: string | number) {
     }
 
     DBState.db.characters[selIdState.selId].chatPage = index
+    applyCurrentChatPromptOptionState()
     ReloadGUIPointer.set(Math.random())
 }
 

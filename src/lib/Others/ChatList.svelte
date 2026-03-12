@@ -1,11 +1,13 @@
 <script>
     import { alertConfirm, alertError } from "../../ts/alert";
     import { language } from "../../lang";
+    import { v4 } from "uuid";
     
     import { DBState } from 'src/ts/stores.svelte';
     import { ReloadGUIPointer, selectedCharID } from "../../ts/stores.svelte";
     import { DownloadIcon, SquarePenIcon, HardDriveUploadIcon, PlusIcon, TrashIcon, XIcon } from "@lucide/svelte";
     import { exportChat, importChat } from "../../ts/characters";
+    import { initializeChatPromptOptionState } from "../../ts/storage/database.svelte";
     import { findCharacterbyId } from "../../ts/util";
     import TextInput from "../UI/GUI/TextInput.svelte";
     import { changeChatTo } from "src/ts/globalApi.svelte";
@@ -72,12 +74,13 @@
                 const cha = DBState.db.characters[$selectedCharID]
                 const len = DBState.db.characters[$selectedCharID].chats.length
                 let chats = DBState.db.characters[$selectedCharID].chats
-                chats.unshift({
-                    message:[], note:'', name:`New Chat ${len + 1}`, localLore:[], fmIndex: -1
-                })
+                const newChat = initializeChatPromptOptionState({
+                    message:[], note:'', name:`New Chat ${len + 1}`, localLore:[], fmIndex: -1, id: v4()
+                }, cha)
+                chats.unshift(newChat)
                 if(cha.type === 'group'){
                     cha.characters.map((c) => {
-                        chats[len].message.push({
+                        newChat.message.push({
                             saying: c,
                             role: 'char',
                             data: findCharacterbyId(c).firstMessage
@@ -85,7 +88,7 @@
                     })
                 }
                 DBState.db.characters[$selectedCharID].chats = chats
-                changeChatTo(len)
+                changeChatTo(0)
                 close()
             }}>
                 <PlusIcon/>

@@ -4,6 +4,7 @@
     import Button from "src/lib/UI/GUI/Button.svelte";
     import TextInput from "src/lib/UI/GUI/TextInput.svelte";
     import type { RisuModule } from "src/ts/process/modules";
+    import { syncCurrentChatPromptOptionState } from "src/ts/storage/database.svelte";
     
     import { DBState, ReloadGUIPointer } from 'src/ts/stores.svelte';
     import { selectedCharID } from "src/ts/stores.svelte";
@@ -95,6 +96,7 @@
                                         DBState.db.characters[$selectedCharID].chats[DBState.db.characters[$selectedCharID].chatPage].modules.push(rmodule.id)
                                     }
                                     DBState.db.characters[$selectedCharID].chats[DBState.db.characters[$selectedCharID].chatPage].modules = DBState.db.characters[$selectedCharID].chats[DBState.db.characters[$selectedCharID].chatPage].modules
+                                    syncCurrentChatPromptOptionState()
                                     $ReloadGUIPointer += 1
                                 }}
                                 oncontextmenu={(e) => {
@@ -109,6 +111,7 @@
                                     else{
                                         DBState.db.characters[$selectedCharID].modules.push(rmodule.id)
                                     }
+                                    syncCurrentChatPromptOptionState()
                                     $ReloadGUIPointer += 1
                                 }}>
 

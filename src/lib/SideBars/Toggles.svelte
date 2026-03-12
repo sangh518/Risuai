@@ -4,6 +4,7 @@
     import { parseToggleSyntax, type sidebarToggle, type sidebarToggleGroup } from "src/ts/util";
     import { language } from "src/lang";
     import type { PromptItem } from "src/ts/process/prompt";
+    import { syncCurrentChatPromptOptionState } from "src/ts/storage/database.svelte";
     import type { character, groupChat } from "src/ts/storage/database.svelte";
     import Accordion from '../UI/Accordion.svelte'
     import CheckInput from "../UI/GUI/CheckInput.svelte";
@@ -69,6 +70,16 @@
             return acc
         }, [])
     })
+
+    function syncToggleState() {
+        syncCurrentChatPromptOptionState()
+    }
+
+    function toggleBooleanValue(key: string) {
+        const toggleKey = `toggle_${key}`
+        DBState.db.globalChatVariables[toggleKey] = DBState.db.globalChatVariables[toggleKey] === '1' ? '0' : '1'
+        syncToggleState()
+    }
 </script>
 
 {#snippet toggles(items: sidebarToggle[], reverse: boolean = false)}
@@ -82,7 +93,7 @@
         {:else if toggle.type === 'select'}
             <div class="w-full flex gap-2 mt-2 items-center" class:justify-end={$MobileGUI} >
                 <span>{toggle.value}</span>
-                <SelectInput className="w-32" bind:value={DBState.db.globalChatVariables[`toggle_${toggle.key}`]}>
+                <SelectInput className="w-32" bind:value={DBState.db.globalChatVariables[`toggle_${toggle.key}`]} onchange={syncToggleState}>
                     {#each toggle.options as option, i}
                         <OptionInput value={i.toString()}>{option}</OptionInput>
                     {/each}
@@ -91,12 +102,12 @@
         {:else if toggle.type === 'text'}
             <div class="w-full flex gap-2 mt-2 items-center" class:justify-end={$MobileGUI}>
                 <span>{toggle.value}</span>
-                <TextInput className="w-32" bind:value={DBState.db.globalChatVariables[`toggle_${toggle.key}`]} />
+                <TextInput className="w-32" bind:value={DBState.db.globalChatVariables[`toggle_${toggle.key}`]} oninput={syncToggleState} onchange={syncToggleState} />
             </div>
         {:else if toggle.type === 'textarea'}
             <div class="w-full flex gap-2 mt-2 items-start" class:justify-end={$MobileGUI}>
                 <span class="mt-1.5">{toggle.value}</span>
-                <TextAreaInput className="w-32" height='20' bind:value={DBState.db.globalChatVariables[`toggle_${toggle.key}`]} />
+                <TextAreaInput className="w-32" height='20' bind:value={DBState.db.globalChatVariables[`toggle_${toggle.key}`]} onInput={syncToggleState} onchange={syncToggleState} />
             </div>
         {:else if toggle.type === 'caption'}
             <div class="w-full mt-1 text-xs text-textcolor2">
@@ -114,9 +125,7 @@
             {/if}
         {:else}
             <div class="w-full flex mt-2 items-center" class:justify-end={$MobileGUI}>
-                <CheckInput check={DBState.db.globalChatVariables[`toggle_${toggle.key}`] === '1'} reverse={reverse} name={toggle.value} onChange={() => {
-                    DBState.db.globalChatVariables[`toggle_${toggle.key}`] = DBState.db.globalChatVariables[`toggle_${toggle.key}`] === '1' ? '0' : '1'
-                }} />
+                <CheckInput check={DBState.db.globalChatVariables[`toggle_${toggle.key}`] === '1'} reverse={reverse} name={toggle.value} onChange={() => toggleBooleanValue(toggle.key)} />
             </div>
         {/if}
     {/each}

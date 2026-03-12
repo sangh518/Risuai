@@ -4,6 +4,7 @@
     import Sortable from 'sortablejs/modular/sortable.core.esm.js';
     import { DownloadIcon, PencilIcon, HardDriveUploadIcon, MenuIcon, TrashIcon, SplitIcon, FolderPlusIcon, BookmarkCheckIcon } from "@lucide/svelte";
 
+    import { initializeChatPromptOptionState } from "src/ts/storage/database.svelte";
     import type { Chat, ChatFolder, character, groupChat } from "src/ts/storage/database.svelte";
     import { DBState, ReloadGUIPointer } from 'src/ts/stores.svelte';
     import { selectedCharID } from "src/ts/stores.svelte";
@@ -140,12 +141,13 @@
         const cha = chara
         const len = chara.chats.length
         let chats = chara.chats
-        chats.unshift({
+        const newChat = initializeChatPromptOptionState({
             message:[], note:'', name:`New Chat ${len + 1}`, localLore:[], fmIndex: -1, id: v4()
-        })
+        }, chara)
+        chats.unshift(newChat)
         if(cha.type === 'group'){
             cha.characters.map((c) => {
-                chats[len].message.push({
+                newChat.message.push({
                     saying: c,
                     role: 'char',
                     data: findCharacterbyId(c).firstMessage
@@ -267,6 +269,7 @@
                                         const newChat = $state.snapshot(chara.chats[chara.chats.indexOf(chat)])
                                         newChat.name = createChatCopyName(newChat.name, 'Copy')
                                         newChat.id = v4()
+                                        initializeChatPromptOptionState(newChat, chara)
                                         chara.chats.unshift(newChat)
                                         changeChatTo(0)
                                         chara.chats = chara.chats
@@ -378,6 +381,7 @@
                                 const newChat = $state.snapshot(chara.chats[i])
                                 newChat.name = createChatCopyName(newChat.name, 'Copy')
                                 newChat.id = v4()
+                                initializeChatPromptOptionState(newChat, chara)
                                 chara.chats.unshift(newChat)
                                 changeChatTo(0)
                                 chara.chats = chara.chats
